@@ -25,5 +25,19 @@ def seed():
         if not db.scalar(select(Assessment).where(Assessment.title==title)):
             ids=db.scalars(select(Process.id).where(Process.code.in_(['HC-S1','HC-S2','HC-S3'])).order_by(Process.id)).all()
             db.add(Assessment(title=title,lot='HC-1115',snapshot=snapshot_for(db,ids,'HC-1115'),status='queued',created_at=datetime.now(timezone.utc).isoformat()));db.commit()
+        # 已签核的历史评议：供清退场景核对“保留原统计量与签核，仅移除快照明细”。
+        approved_title='HC-1115 封合参数复核（已签核）'
+        if not db.scalar(select(Assessment).where(Assessment.title==approved_title)):
+            from src.services.statistics import anova
+            from src.services import artifacts
+            ids=db.scalars(select(Process.id).where(Process.code.in_(['HC-S1','HC-S2','HC-S3'])).order_by(Process.id)).all()
+            snapshot=snapshot_for(db,ids,'HC-1115')
+            item=Assessment(title=approved_title,lot='HC-1115',snapshot=snapshot,status='completed',result=anova(snapshot),
+                            recommendation='建议 HC-S2 进入下一轮试产验证；额外保压时间可能增加能耗，需继续观察外观与封口完整性，不能只根据 p 值选型。',
+                            selected_process_id=ids[1],approved=True,approved_by='admin@demo.local',
+                            created_at=datetime.now(timezone.utc).isoformat())
+            db.add(item);db.commit();db.refresh(item)
+            try:artifacts.write(item)
+            except OSError:pass
         counts={t.__tablename__:db.scalar(select(func.count()).select_from(t)) for t in [User,Process,Sample,Assessment]};print(json.dumps(counts));return counts
 if __name__=='__main__':seed()

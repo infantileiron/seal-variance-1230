@@ -14,14 +14,15 @@
 2. **拉力录入**：按方案与材料批次登记最大拉力，支持筛选、异常标记与修订；标记样本保留在统计中。
 3. **方差分析**：选择至少两个方案与材料批次，后台 worker 计算 SS、F、p、η²；每次提交冻结参数和测量快照。
 4. **工艺评议**：查看组别均值/标准差，填写推荐方案和至少20字业务理由，负责人签核后冻结，下载 JSON，负责人可查看操作审计。
+5. **批次清退**：拉力明细到期后按材料批次清退，先预览受影响样本、评议与结果文件，再清除试条编号、逐条拉力与备注；其他批次不动。
 
 ### 角色与账号
 
 | 角色 | 账号 | 权限与典型动作 |
 |---|---|---|
-| admin / 工艺负责人 | admin@demo.local | 所有业务编辑、计算、推荐、签核冻结、审计 |
+| admin / 工艺负责人 | admin@demo.local | 所有业务编辑、计算、推荐、签核冻结、批次清退、审计 |
 | analyst / 工艺工程师 | analyst@demo.local | 方案与样本新增/修订、提交计算、起草推荐；不能签核 |
-| viewer / 只读观察员 | viewer@demo.local | 查看四模块、下载已完成结果；不能编辑或提交任务 |
+| viewer / 只读观察员 | viewer@demo.local | 查看各模块与清退进度、下载已完成结果；不能编辑、提交任务或发起清退 |
 
 三个演示账号密码均为 `Demo123!`。权限由后端 JWT 与数据库角色共同校验；前端同步隐藏写入入口。
 
@@ -59,7 +60,20 @@ Docker 默认网络池不足时使用独立可配置子网，默认 `10.253.105.
 | 计算 | SciPy 1.14.1 F 分布尾概率；其余方差分解由 Python 实算 |
 | 队列/数据 | Redis 7、PostgreSQL 16 |
 
-前端无构建步骤。后端可在 `backend/` 创建虚拟环境并安装 `requirements.txt`，设置 `DATABASE_URL`、`REDIS_URL`、`JWT_SECRET` 后运行 `uvicorn src.main:app --reload`，另开终端 `python -m src.worker`。开发时前端请求 `/api/`，Nginx 去掉此代理前缀；直接访问后端时路由不带 `/api`。数据库启动时由 SQLAlchemy 建表，`backend/migrations/001_initial.sql` 提供同等初始 DDL。
+前端无构建步骤。后端可在 `backend/` 创建虚拟环境并安装 `requirements.txt`，设置 `DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`（可选 `ARTIFACTS_DIR`，默认 `/app/artifacts`）后运行 `uvicorn src.main:app --reload`，另开终端 `python -m src.worker`。既有数据库升级执行 `backend/migrations/002_batch_purge.sql`。开发时前端请求 `/api/`，Nginx 去掉此代理前缀；直接访问后端时路由不带 `/api`。数据库启动时由 SQLAlchemy 建表，`backend/migrations/001_initial.sql` 提供同等初始 DDL。
+
+## 批次清退口径
+
+清退以材料批次为单位，仅负责人（admin）可发起；任何人可预览范围、查看进度。执行口径：
+
+- **样本行**：保留行、工艺归属、材料批次与清退时间，但试条编号、逐条拉力、备注与异常标记被清除（数据库列置空），行本身用于核对条数。
+- **评议**：已完成评议保留原统计量（SS/F/p/η² 与 checksum）、推荐与签核，只从快照和结果文件中移除该批次的逐条明细，并记录 `purged_lots`。尚未完成（queued/running）的评议因输入失效明确失败，不写回旧结果。
+- **其他批次**：样本、快照与结果文件逐字不变。
+- **结果文件**：与数据库同步清除；清退时扫描整个产物目录，孤立残留副本一并处理。
+- **并发**：清退、新建评议、样本写入与计算回写共用同一互斥锁（PostgreSQL 会话级 advisory lock，SQLite 退化为进程内锁），旧副本不会在清退后重新出现。
+- **失败与重试**：数据库或任一文件清除失败都保持「清退中」，阻止相关导出与该批次的新建评议；重试幂等，只补做未完成条目。全部核对一致后才显示「清退完成」并记一次操作审计，重试不重复记账。
+
+清退不可撤销；清退后该批次不参与新评议，样本不足时后台任务明确失败。
 
 ## 算法口径与失败态
 
@@ -79,7 +93,7 @@ Docker 默认网络池不足时使用独立可配置子网，默认 `10.253.105.
 
 ## Seed 与一天的工作剧本
 
-随机种子 `3105`。自然键为用户邮箱、工艺编号、样本编号、评议标题；已有对象不覆盖，重复 seed 不增行、不覆盖用户修改。初始3账号、3方案、105样本、1个待执行评议（worker 真实计算）。
+随机种子 `3105`。自然键为用户邮箱、工艺编号、样本编号、评议标题；已有对象不覆盖，重复 seed 不增行、不覆盖用户修改。初始3账号、3方案、105样本、1个待执行评议（worker 真实计算）与 1 个已签核评议（供清退核对）。
 
 | 方案 | 温度 ℃ | 保压 s | 压力 MPa | 样本 |
 |---|---:|---:|---:|---:|
@@ -96,6 +110,7 @@ Docker 默认网络池不足时使用独立可配置子网，默认 `10.253.105.
 7. 10:00 起草推荐 HC-S2，说明额外保压时间可能增加能耗，需继续验证外观和封口完整性，不能只根据 p 值选型。
 8. 10:10 负责人登录，检查推荐理由后签核，评议冻结。
 9. 10:20 观察员下载 `seal-variance-<id>.json`，包含快照与签核者，交给试产负责人。
+10. 到期后负责人在「批次清退」预览并清退 `HC-1115`：已完成评议保留原统计量与签核，逐条拉力明细与结果文件副本清除，导出不再含该批次明细；其他批次不动。
 
 ## 目录与共享枚举
 
@@ -106,10 +121,10 @@ backend/scripts/seed_demo.py
 backend/migrations/001_initial.sql
 ```
 
-共享枚举为 ROLES 与 TASK_STATUS/STATUS：后端 `src/constants/enums.py`，认证判断在 `src/utils/security.py`，状态在 `src/services/assessments.py` 与 `src/worker.py`；前端 `src/constants/enums.js`、`src/components/common/status.js`、`src/app.js`。角色枚举 admin/analyst/viewer；任务状态 queued/running/completed/failed，另有 approved 布尔业务状态。
+共享枚举为 ROLES、TASK_STATUS/STATUS 与 PURGE_STATUS：后端 `src/constants/enums.py`，认证判断在 `src/utils/security.py`，状态在 `src/services/assessments.py`、`src/services/purges.py` 与 `src/services/compute.py`；前端 `src/constants/enums.js`、`src/components/common/status.js`、`src/components/purge.js`、`src/app.js`。角色枚举 admin/analyst/viewer；任务状态 queued/running/completed/failed；清退状态 purging/completed，另有 approved 布尔业务状态。
 
 ## 已知范围
 
-小型项目逐条登记，不含 Excel/CSV 批量导入、删除、分页、自动取样设备连接、事后多重比较或外部电子签名。评议是本地数据库签核。时间戳以 UTC 留痕。前端字体从 Google Fonts 加载，离线时使用指定 serif 回退；核心业务不依赖字体服务。测试脚本、截图与 TESTING.md 位于批次 `test-artifacts/gb-3105/`，源码目录不存放这些证据。
+小型项目逐条登记，不含 Excel/CSV 批量导入、删除、分页、自动取样设备连接、事后多重比较或外部电子签名。评议是本地数据库签核。批次清退只清除拉力明细，不删除评议、方案或样本行；没有自动到期定时任务，由负责人按批次手动发起。时间戳以 UTC 留痕。前端字体从 Google Fonts 加载，离线时使用指定 serif 回退；核心业务不依赖字体服务。测试脚本、截图与 TESTING.md 位于批次 `test-artifacts/gb-3105/`，源码目录不存放这些证据。
 
 MIT License，见 LICENSE。

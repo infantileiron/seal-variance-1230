@@ -1,1 +1,1 @@
-export const ROLES={admin:'工艺负责人',analyst:'工艺工程师',viewer:'只读观察员'};export const STATUS={queued:'待计算',running:'计算中',completed:'计算完成',failed:'计算失败'};
+export const ROLES={admin:'工艺负责人',analyst:'工艺工程师',viewer:'只读观察员'};export const STATUS={queued:'待计算',running:'计算中',completed:'计算完成',failed:'计算失败'};export const PURGE_STATUS={purging:'清退中',completed:'清退完成'};export const PURGE_HINT={purging:'数据库或文件尚未全部清除，导出已阻止；可重试未完成部分。',completed:'全部核对一致，已完成清退。'};

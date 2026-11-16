@@ -5,7 +5,7 @@ from fastapi.responses import Response
 from src.config.database import get_db
 from src.utils.security import current_user,editor,admin
 from src.schemas.business import AssessmentInput,RecommendationInput
-from src.services import assessments
+from src.services import assessments,artifacts,purges
 from src.controllers.business import serialize,serialize_many
 from src.models.entities import Audit
 router=APIRouter()
@@ -23,6 +23,10 @@ def approve(id:int,db=Depends(get_db),user=Depends(admin)):return serialize(asse
 def export(id:int,db=Depends(get_db),user=Depends(current_user)):
     item=assessments.get(db,id)
     if item.status!='completed':raise HTTPException(409,'计算未成功完成，不能导出')
-    return Response(json.dumps(serialize(item),ensure_ascii=False,indent=2),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="seal-variance-{id}.json"'})
+    busy=purges.blocking_job(db,item)
+    if busy:raise HTTPException(409,f'材料批次 {busy.lot} 正在清退（任务 #{busy.id}），完成并核对一致后才能导出')
+    # 以数据库为准渲染：数据库是签核与快照的权威来源，结果文件是同步副本。
+    document=artifacts.payload(item)
+    return Response(json.dumps(document,ensure_ascii=False,indent=2),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="seal-variance-{id}.json"'})
 @router.get('/audit')
 def audit(db=Depends(get_db),user=Depends(admin)):return serialize_many(db.scalars(select(Audit).order_by(Audit.id.desc()).limit(100)).all())
